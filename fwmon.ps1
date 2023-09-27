@@ -1,6 +1,6 @@
 ﻿### fwmon
 $applicationName = "Firewall Monitor"
-$applicationVersion = "1.0.0.0"
+$applicationVersion = "1.0.0.1"
 
 Add-Type -AssemblyName PresentationFramework
 Add-Type -AssemblyName System.Windows.Forms
