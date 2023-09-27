@@ -456,27 +456,23 @@ $Button_outExcel.add_Click.Invoke({
 
         Write-Host $((Get-Date).ToString("yyyy/MM/dd HH:mm:ss")) -no ; Write-Host " Start converting data to Excel file" -ForegroundColor $MessagesColor
         $excelObject = New-Object -ComObject Excel.Application
-        $excelWorkbook = $excelObject.Workbooks.Add()
-        $excelSheet = $excelWorkbook.Sheets.Item(1)
-
-        $i = 1
-        Import-Csv -Path $FileName -Delimiter ";" | % {
-            $j = 1
-            $_.PSObject.Properties | % {
-            if ($i -eq 1) {
-              $excelSheet.Cells.Item($i, $j++).Value = $_.Name
-            } else {
-              $excelSheet.Cells.Item($i, $j++).Value = $_.Value
-            }
-          }
-          $i++
-        }
-        $excelSheet.Cells.EntireColumn.AutoFit()  | Out-Null
-        $headerRange = $excelSheet.Range("a1","p1")
+        $Workbook = $excelObject.Workbooks.Add()
+        $worksheet = $Workbook.Sheets.Item(1)
+        $csvConnector = $worksheet.QueryTables.add($("TEXT;" + $FileName), $worksheet.Range("A1"))
+        $query = $worksheet.QueryTables.item($csvConnector.name)
+        $query.TextFileOtherDelimiter = ";"
+        $query.AdjustColumnWidth = 1
+        $query.Refresh()| Out-Null
+        $query.Delete()
+        Add-Type -AssemblyName "Microsoft.Office.Interop.Excel"
+        $worksheet.Cells.EntireColumn.AutoFit()  | Out-Null
+        $worksheet.Columns.AutoFit() | Out-Null
+        $headerRange = $worksheet.Range("A1","P1")
         $headerRange.AutoFilter() | Out-Null
+        $table = $excelObject.ActiveSheet.ListObjects.Add([Microsoft.Office.Interop.Excel.XlListObjectSourceType]::xlSrcRange, $excelObject.ActiveCell.CurrentRegion, $null ,[Microsoft.Office.Interop.Excel.XlYesNoGuess]::xlYes)
         $xlsxFile = $FileName.replace(".txt",".xlsx")
-        $excelWorkbook.SaveAs($xlsxFile, 51)
-        $excelWorkbook.Close()
+        $Workbook.SaveAs($xlsxFile, 51)
+        $Workbook.Close()
         $excelObject.Quit()
         Write-Host $((Get-Date).ToString("yyyy/MM/dd HH:mm:ss")) -no ; Write-Host " Stop converting data to Excel file" -ForegroundColor $MessagesColor
         Write-Host $((Get-Date).ToString("yyyy/MM/dd HH:mm:ss")) -no ; Write-Host " Opening Excel file ..." -ForegroundColor $MessagesColor
