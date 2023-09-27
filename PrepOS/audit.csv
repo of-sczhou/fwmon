@@ -1,0 +1,3 @@
+Machine Name,Policy Target,Subcategory,Subcategory GUID,Inclusion Setting,Exclusion Setting,Setting Value
+,System,Audit Filtering Platform Connection,{0cce9226-69ae-11d9-bed3-505054503030},Success and Failure,,3
+,System,Audit Filtering Platform Packet Drop,{0cce9225-69ae-11d9-bed3-505054503030},Success and Failure,,3
