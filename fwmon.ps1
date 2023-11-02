@@ -1,4 +1,4 @@
-﻿### fwmon
+﻿### fwmon start
 $applicationName = "Firewall Monitor"
 $applicationVersion = "1.0.0.1"
 
@@ -20,7 +20,7 @@ $ConsoleHandle = (Get-Process | ? {$_.MainWindowTitle -eq $ConsoleTitle}).MainWi
 
 [System.Collections.ArrayList]$Global:EventsArr = [System.Collections.ArrayList]::new()
 # Initial Value of Event Buffer Max Length
-[int32]$Global:EventsArrMaxLength = 1000
+[int32]$Global:EventsArrMaxLength = 10000
 
 $MessagesColor = "Yellow"
 
@@ -209,7 +209,6 @@ Function Get-Window {
     }
 }
 
-
 $Window_main.add_MouseLeftButtonDown({$Window_main.DragMove()})
 
 $ButtonWholeWindow.Add_Click.Invoke({
@@ -217,7 +216,437 @@ $ButtonWholeWindow.Add_Click.Invoke({
    $ButtonWholeWindow.Visibility = "Hidden"
 })    
 
+# ButtonRules
+$Button_FilterId.add_Click.Invoke({
+    $filepath = "$env:TMP\filters.xml"
+    If (Test-Path $filepath) {Remove-Item -Path $filepath -Force}
+    $Arguments = "/c netsh wfp show filter file = " + $filepath
+    Try {
+        Start-Process -FilePath ($env:SystemRoot + "\System32\cmd.exe") -ArgumentList $Arguments -Verb runAs
+        $Locked = $True
+                                        Do {
+        Start-Sleep -Milliseconds 100
+        If (Test-Path $filepath) {
+            try {
+                [IO.File]::OpenWrite($filepath).close()
+                $Locked = $False
+            } catch {}
+        }
+    } While ($Locked)
+    
+        [System.Collections.ArrayList]$AllFilters = @()
+        $Filters = Select-Xml -Path $filepath -XPath "/wfpdiag/filters/item"
+
+        $Filters | % {
+            $AllFilters += New-Object -Type PSObject -Prop @{ ‘FilterId’ = $_.Node.filterId ; ‘Name’ = $_.Node.DisplayData.Name ; ‘Description’ = $_.Node.DisplayData.Description ; ‘Action’ = $_.Node.Action.Type}
+        }
+        $AllFilters | Sort filterId | Select filterId,Name,Description,Action | Out-GridView -Title "All Filters"
+
+        Remove-Item -Path $filepath -Force
+    } catch {}
+})
+
+# Button_Hide
+$Button_Hide.add_Click.Invoke({
+    $Window_main.WindowState = "Minimized"
+})
+
+# ButtonSecPol
+$ButtonSecPol.add_Click.Invoke({ Start-Process -FilePath ($env:SystemRoot+"\system32\mmc.exe") -ArgumentList $("$Env:SystemRoot\System32\secpol.msc") -Verb runAs })
+
+# ButtonWF
+$ButtonWF.add_Click.Invoke({
+    Try { Start-Process -FilePath ($env:SystemRoot+"\system32\mmc.exe") -ArgumentList ($env:SystemRoot+"\system32\wf.msc") -Verb runAs } catch {}
+})
+
+$Query = @"
+<QueryList>
+    <Query Id="0" Path="Security">
+    <Select Path="Security">*[System[(EventID=5150 or EventID=5152 or EventID=5153 or EventID=5156 or EventID=5157)]]</Select>
+    </Query>
+</QueryList>
+"@
+
+$subscriptionQuery = [System.Diagnostics.Eventing.Reader.EventLogQuery]::new("Security",[System.Diagnostics.Eventing.Reader.PathType]::LogName,$Query)
+[System.Diagnostics.Eventing.Reader.EventLogWatcher]$Global:Watcher = [System.Diagnostics.Eventing.Reader.EventLogWatcher]::new($subscriptionQuery)
+
+# Thread for getting svchost instances to array
+[System.Collections.ArrayList]$TaskList = New-Object System.Collections.ArrayList
+[System.Collections.ArrayList]$((Tasklist /svc /fo csv /nh /fi "imagename eq svchost.exe").Replace('"',"")) | % {
+    $TaskList.Add([pscustomobject] @{PID = $_.Split(",")[1]; SvcName = $_.Split(",")[2]}) | Out-Null
+}
+$hashtable_TaskList = [hashtable]::Synchronized(@{Parent_TaskList = $TaskList ; Parent_Watcher = $Global:Watcher ; Parent_ConsoleHost = (Get-Host)})
+$Runspace_TaskList =[runspacefactory]::CreateRunspace()
+$Runspace_TaskList.ApartmentState = "STA"
+$Runspace_TaskList.ThreadOptions = "Default"         
+$Runspace_TaskList.Open()
+$Runspace_TaskList.SessionStateProxy.SetVariable("hashtable_TaskList",$hashtable_TaskList)
+$psCmd_TaskList = [PowerShell]::Create()
+[void]$psCmd_TaskList.AddScript({
+    # Subscriber for ProcessCreated Event
+    $queryParameters = '__InstanceCreationEvent', (New-Object TimeSpan 0,0,1), "TargetInstance isa 'Win32_Process'"
+    $Query = New-Object System.Management.WqlEventQuery -ArgumentList $queryParameters
+    $ProcessWatcher = New-Object System.Management.ManagementEventWatcher $Query
+
+    Register-ObjectEvent -InputObject $ProcessWatcher -EventName "EventArrived" -Action { 
+        if ($hashtable_TaskList.Parent_Watcher.Enabled -and ($EventArgs.NewEvent.TargetInstance.Description -eq "svchost.exe")) {
+            $hashtable_TaskList.Parent_TaskList.Clear()
+            [System.Collections.ArrayList]$((Tasklist /svc /fo csv /nh /fi "imagename eq svchost.exe").Replace('"',"")) | % {
+                $hashtable_TaskList.Parent_TaskList.Add([pscustomobject] @{PID = $_.Split(",")[1]; SvcName = $_.Split(",")[2]})
+            }
+            #$hashtable_TaskList.Parent_ConsoleHost.Ui.WriteLine("*_* ProcCr")
+        }
+    }
+
+    # Subscriber for ProcessDeleted Event
+    $queryParameters2 = '__InstanceDeletionEvent', (New-Object TimeSpan 0,0,1), "TargetInstance isa 'Win32_Process'"
+    $Query2 = New-Object System.Management.WqlEventQuery -ArgumentList $queryParameters2
+    $ProcessWatcher2 = New-Object System.Management.ManagementEventWatcher $query2
+
+    Register-ObjectEvent -InputObject $ProcessWatcher2 -EventName "EventArrived" -Action {
+        if ($hashtable_TaskList.Parent_Watcher.Enabled -and ($EventArgs.NewEvent.TargetInstance.Description -eq "svchost.exe")) {
+            $hashtable_TaskList.Parent_TaskList.Clear()
+            [System.Collections.ArrayList]$((Tasklist /svc /fo csv /nh /fi "imagename eq svchost.exe").Replace('"',"")) | % {
+                $hashtable_TaskList.Parent_TaskList.Add([pscustomobject] @{PID = $_.Split(",")[1]; SvcName = $_.Split(",")[2]})
+            }
+        }
+    }
+})
+$psCmd_TaskList.Runspace = $Runspace_TaskList
+$Runspace_TaskList_Handle = $psCmd_TaskList.BeginInvoke()
+
+# Thread for periodical getting DNS cache to array $DNSCache
+$DNSCache = Try {Get-DnsClientCache -Type $("A","AAAA") -ea 0 | Select Name,Data} catch {}
+$hashtable_DNSCache = [hashtable]::Synchronized(@{ Parent_DNSCache = $DNSCache ; Parent_Watcher = $Global:Watcher })
+$Runspace_DNSCache =[runspacefactory]::CreateRunspace()
+$Runspace_DNSCache.ApartmentState = "STA"
+$Runspace_DNSCache.ThreadOptions = "Default"         
+$Runspace_DNSCache.Open()
+$Runspace_DNSCache.SessionStateProxy.SetVariable("hashtable_DNSCache",$hashtable_DNSCache)
+$psCmd_DNSCache = [PowerShell]::Create()
+[void]$psCmd_DNSCache.AddScript({
+    Do {
+        if ($hashtable_DNSCache.Parent_Watcher.Enabled) { $hashtable_DNSCache.Parent_DNSCache = $(Try {Get-DnsClientCache -Type $("A","AAAA") -ea 0 | Select Name,Data} catch {}) | Select Name,Data } ; Start-Sleep 3
+    } Until ($Something)
+})
+$psCmd_DNSCache.Runspace = $Runspace_DNSCache
+$Runspace_DNSCache_Handle = $psCmd_DNSCache.BeginInvoke()
+
+# Thread for catching Security Log Events
+$hashtable_Events = [Hashtable]::Synchronized(@{
+    Parent_ConsoleHost = (Get-Host)
+    Parent_Window_main = $Window_main
+    MessagesColor = $MessagesColor
+    Parent_Button_outTXT = $Button_outTXT
+    Parent_CheckBox_IPv4_IsChecked = $CheckBox_IPv4.IsChecked
+    Parent_CheckBox_IPv6_IsChecked = $CheckBox_IPv6.IsChecked
+    Parent_CheckBox_DNS_IsChecked = $CheckBox_DNS.IsChecked
+    Parent_CheckBox_DHCP_IsChecked = $CheckBox_DHCP.IsChecked
+    Parent_CheckBox_Local_IsChecked = $CheckBox_Local.IsChecked
+    Parent_CheckBox_Other_IsChecked = $CheckBox_Other.IsChecked
+    Parent_CheckBox_Global_IsChecked = $CheckBox_Global.IsChecked
+    Parent_TextBox_MarkText_Text = $TextBox_MarkText.Text
+    Parent_TextBox_MatchText_Text = $TextBox_MatchText.Text
+    Parent_MessagesColor = $MessagesColor
+    Parent_Watcher = $Global:Watcher
+    Parent_EventsArr = $Global:EventsArr
+    Parent_Tasklist = $TaskList
+    Parent_DNSServers = $DNSServers
+    Parent_DNSCache = $DNSCache
+    Parent_EventsArrMaxLength = $Global:EventsArrMaxLength
+    Parent_Protocols =  @{[UInt32]0 = "HOPOPT" ; [UInt32]1 = "ICMP" ; [UInt32]2 = "IGMP"; [UInt32]4 = "IP encapsulation" ; [UInt32]6 = "TCP"; [UInt32]17 = "UDP" ; [UInt32]58 = "IPv6-ICMP"}
+    Parent_FWActions = @{[int64]-9214364837600034816 = "Allow" ; [int64]-9218868437227405312 = "Deny"}
+    Parent_ActionsColor = @{[int64]-9214364837600034816 = "White" ; [int64]-9218868437227405312 = "DarkGray"}
+    Parent_FWDirections = @{"%%14593" = "OUT" ; "%%14592" = "IN"}
+    Parent_PrivateAddresses = '(^127\.)|(^192\.168\.)|(^169\.254\.)|(^10\.)|(^224\.)|(^240\.)|(^172\.1[6-9]\.)|(^172\.2[0-9]\.)|(^172\.3[0-1]\.)|(^::1$)|(^[fF][cCdD])|(2(?:2[4-9]|3\d)(?:\.(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]\d?|0)){3}$)|(255.255.255.255)'
+})
+$Global:Runspace_Events =[runspacefactory]::CreateRunspace()
+$Global:Runspace_Events.ApartmentState = "STA"
+$Global:Runspace_Events.ThreadOptions = "Default"         
+$Global:Runspace_Events.Open()
+$Global:Runspace_Events.SessionStateProxy.SetVariable("hashtable_Events",$hashtable_Events)
+$Global:psCmd_Events = [PowerShell]::Create()
+[void]$Global:psCmd_Events.AddScript({
+    <#
+    00 RecordID
+    01 TimeCreated
+    02 ProcessID
+    03 appFullPath
+    04 appname
+    05 FilterRTID
+    06 Action
+    07 Direction
+    08 SourceAddress
+    09 SourceName
+    10 SourcePort
+    11 DestAddress
+    12 DestName
+    13 Destport
+    14 Protocol
+    15 InterfaceIndex
+    #>
+
+    Register-ObjectEvent -InputObject $hashtable_Events.Parent_Watcher -EventName "EventRecordWritten" -Action {
+        if ($hashtable_Events.Parent_Watcher.Enabled) {
+            Try {
+                $EventRecord = $EventArgs.EventRecord
+                $EventRecordXML = [xml]$EventRecord.ToXml()
+                $matchArray = ($hashtable_Events.Parent_TextBox_MatchText_Text -split ",")
+                $matchArrayPos = $matchArray.Where({ $_[0] -ne "!" })
+                $tmpArrayNeg = $matchArray.where({ $_[0] -eq "!" })
+                $matchArrayNeg = New-Object System.Collections.ArrayList($null) ; $tmpArrayNeg | % {$matchArrayNeg += $_.replace("!","")}
+                $appFullPath = $EventRecord.Properties[1].Value
+                $appName = $appFullPath.Substring($appFullPath.LastIndexOf("\") + 1)
+                if ($appName -eq "svchost.exe") {
+                    Try { $appName += "|$( $hashtable_Events.Parent_Tasklist.Where({$_.PID -eq [string]$EventRecord.Properties[0].Value}).SvcName )" } catch {$appName += "|-"}
+                    $appFullPath += $appName.Substring(11)
+                }
+
+                $outstr = @($( `
+                $EventRecord.RecordID, `
+                $EventRecord.TimeCreated.ToString("yyyy/MM/dd HH:mm:ss"), `
+                [string]$EventRecord.Properties[0].Value, `
+                $appFullPath, `
+                $appname, `
+                $("FilterId:" + ((($EventRecordXML).Event.EventData.Data.Where({$_.Name -eq "FilterRTID"})).'#text')), `
+                $($hashtable_Events.Parent_FWActions.($EventRecord.Keywords)), `
+                $($hashtable_Events.Parent_FWDirections.($EventRecord.Properties[2].Value)), `
+                $EventRecord.Properties[3].Value, `
+                $( ([object[]]($hashtable_Events.Parent_DNSCache.Where({$_.Data -eq $EventRecord.Properties[3].Value}))[0]).Name ), `
+                $EventRecord.Properties[4].Value, `
+                $EventRecord.Properties[5].Value, `
+                $( ([object[]]($hashtable_Events.Parent_DNSCache.Where({$_.Data -eq $EventRecord.Properties[5].Value}))[0]).Name ), `
+                $EventRecord.Properties[6].Value, `
+                $($hashtable_Events.Parent_Protocols.$($EventRecord.Properties[7].Value)), `
+                $((($EventRecordXML).Event.EventData.Data.Where({$_.Name -eq "InterfaceIndex"})).'#text') ))
+
+                # Apply filters
+                $EventFiltered = $false
+
+                if ((-Not $hashtable_Events.Parent_CheckBox_IPv4_IsChecked) -and ($outstr[8].Indexof(":") -eq -1) -and ($outstr[11].Indexof(":") -eq -1)) {$EventFiltered = $true}
+                if ((-Not $hashtable_Events.Parent_CheckBox_IPv6_IsChecked) -and ($outstr[8].Indexof(":") -ne -1) -and ($outstr[11].Indexof(":") -ne -1)) {$EventFiltered = $true}
+                if ((-Not $hashtable_Events.Parent_CheckBox_DNS_IsChecked) -and ($hashtable_Events.Parent_DNSServers.IndexOf($outstr[11]) -ne -1) -and (($outstr[13] -eq "53") -or ($outstr[13] -eq "5353"))) {$EventFiltered = $true}
+                if ((-Not $hashtable_Events.Parent_CheckBox_DHCP_IsChecked) -and ((($outstr[10] -eq "68") -and ($outstr[13] -eq "67")) -or (($outstr[8].Indexof(":") -ne -1) -and (($outstr[10] -eq "546") -or ($outstr[13] -eq "547")))) -and ($outstr[14] -eq "UDP")) {$EventFiltered = $true}
+            
+                $SourceIPIsPrivate = $outstr[8] -match $hashtable_Events.Parent_PrivateAddresses
+                $DestIPIsPrivate = $outstr[11] -match $hashtable_Events.Parent_PrivateAddresses
+                if (-Not $hashtable_Events.Parent_CheckBox_Other_IsChecked) {
+                    If ($SourceIPIsPrivate -and $DestIPIsPrivate) {$EventFiltered = $true}
+                }
+                if (-Not $hashtable_Events.Parent_CheckBox_Global_IsChecked) {
+                    If ((-Not $SourceIPIsPrivate) -or (-Not $DestIPIsPrivate)) {$EventFiltered = $true}
+                }
+                    
+                if ($hashtable_Events.Parent_TextBox_MatchText_Text -ne "") {
+                    If ($matchArrayNeg.Count -ne 0) {
+                        If ( ($matchArrayNeg.Where({ $outstr[1,2,4,5,6,7,8,9,10,11,12,13,14,15] -match $_ })).Count -gt 0 ) {
+                            $EventFiltered = $true
+                        }
+                    }
+                    If ($matchArrayPos.Count -ne 0) {
+                        If ( ($matchArrayPos.Where({ $outstr[1,2,4,5,6,7,8,9,10,11,12,13,14,15] -match $_ })).Count -ne $matchArrayPos.Count ) {
+                            $EventFiltered = $true
+                        }
+                    }
+                }
+
+                #$hashtable_Events.Parent_ConsoleHost.Ui.WriteLine($($hashtable_Events.Parent_EventsArr.Count))
+                If (-Not $EventFiltered) {
+                    # Out-Array
+                    if ($hashtable_Events.Parent_EventsArrMaxLength -ne 0) {
+                        If ($hashtable_Events.Parent_EventsArr.Count -gt $hashtable_Events.Parent_EventsArrMaxLength) { $hashtable_Events.Parent_EventsArr.RemoveRange(0,($hashtable_Events.Parent_EventsArr.Count - $hashtable_Events.Parent_EventsArrMaxLength)) }
+                        If ($hashtable_Events.Parent_EventsArr.Count -eq $hashtable_Events.Parent_EventsArrMaxLength) { $hashtable_Events.Parent_EventsArr.RemoveAt(0) }
+                    }
+                    $hashtable_Events.Parent_EventsArr.Add($(@($outStr[0];[string[]]($outStr[1] -split " ");[string[]]$outStr[2,3,5,6,7,8,9,10,11,12,13,14,15]) -join ";"))
+                
+
+                    #Out-Console
+                    $BackgroundColor = $hashtable_Events.Parent_ConsoleHost.UI.RawUI.BackgroundColor
+                    $ForegroundMarkColor = "Yellow"
+
+                    if ($hashtable_Events.Parent_TextBox_MarkText_Text -eq "") {
+                        $hashtable_Events.Parent_ConsoleHost.Ui.WriteLine($($hashtable_Events.Parent_ActionsColor.($EventRecord.Keywords)),$BackgroundColor,$($outstr[1,2,4,5,6,7,8,9,10,11,12,13,14,15]))
+                    } else {
+                        $markArray = ($hashtable_Events.Parent_TextBox_MarkText_Text -split ",")
+                        $bColor = $BackgroundColor
+                        If ( $markArray.Where({ $outstr[1,2,4,5,6,7,8,9,10,11,12,13,14,15] -match $_ }) ) {
+                            $bColor = "DarkGreen"
+                            ForEach ($element in $outstr[1,2,4,5,6,7,8,9,10,11,12,13,14,15]) {
+                                If ( $markArray.Where({ $element -match $_ }) ) {$fColor = $ForegroundMarkColor} else {$fColor = $($hashtable_Events.Parent_ActionsColor.($EventRecord.Keywords))}
+                                $hashtable_Events.Parent_ConsoleHost.Ui.Write($fColor,$bColor,($element + " "))
+                            }
+                            $hashtable_Events.Parent_ConsoleHost.Ui.WriteLine()
+                        }
+                        else {
+                            $hashtable_Events.Parent_ConsoleHost.Ui.WriteLine($($hashtable_Events.Parent_ActionsColor.($EventRecord.Keywords)),$BackgroundColor,$($outstr[1,2,4,5,6,7,8,9,10,11,12,13,14,15]))
+                        }
+                    }   
+                }
+
+            #$hashtable_Events.Parent_ConsoleHost.Ui.WriteLine($((New-TimeSpan -Start $StartDateTime -End (Get-Date)).TotalMilliseconds))
+            } catch {$hashtable_Events.Parent_ConsoleHost.Ui.WriteLine(@($_.InvocationInfo.PositionMessage))}
+        }
+    }
+
+})
+$Global:psCmd_Events.Runspace = $Global:Runspace_Events
+$Global:Runspace_Events_Handle = $Global:psCmd_Events.BeginInvoke()
+
+# Button_Go
+$Button_Go.add_Click.Invoke({
+    Write-Host $((Get-Date).ToString("yyyy/MM/dd HH:mm:ss")) -no ; Write-Host " Start Events subscriber" -ForegroundColor $MessagesColor
+    $Button_Go.IsEnabled = $false
+    $Button_outTXT.IsEnabled = $true
+
+    [System.Collections.ArrayList]$DNSServers = @()
+    $DNSServers += (Get-DnsClientServerAddress).ServerAddresses
+    $Global:EventsArr.Clear()
+
+    if (-Not ($CheckBox_Past.IsChecked)) { # realtime monitor
+        $Button_Stop.IsEnabled = $true
+        $hashtable_Events.Parent_DNSServers = $DNSServers
+        $Global:Watcher.Enabled = $true
+    } else { # Past Events query
+        $EndDateTime = Get-Date
+        If ($PastEventsWindow_CheckBox_last.IsChecked) {
+            $CheckedRadioButton = ($PastEventsWindow_StackPanel_Lower.Children | ? {$_.IsChecked}).Name
+            Switch ($CheckedRadioButton) {
+                "RadioButton_minutes" {$StartDateTime = $EndDateTime.AddMinutes(-([int]($PastEventsWindow_TextBox_last.Text)))}
+                "RadioButton_hours" {$StartDateTime = $EndDateTime.AddHours(-([int]($PastEventsWindow_TextBox_last.Text)))}
+                "RadioButton_days" {$StartDateTime = $EndDateTime.AddDays(-([int]($PastEventsWindow_TextBox_last.Text)))}
+            }
+        }
+        else {
+            $StartDateTime = Get-Date -Year $PastEventsWindow_TextBox_SY.Text -Month $PastEventsWindow_TextBox_SM.Text -Day $PastEventsWindow_TextBox_SD.Text -Hour $PastEventsWindow_TextBox_SH.Text -Minute $PastEventsWindow_TextBox_SMt.Text -Second $PastEventsWindow_TextBox_SS.Text
+            $EndDateTime = Get-Date -Year $PastEventsWindow_TextBox_TY.Text -Month $PastEventsWindow_TextBox_TM.Text -Day $PastEventsWindow_TextBox_TD.Text -Hour $PastEventsWindow_TextBox_TH.Text -Minute $PastEventsWindow_TextBox_TMt.Text -Second $PastEventsWindow_TextBox_TS.Text
+        }
+
+        Write-Host "Reading event log" -ForegroundColor $MessagesColor
+        [System.Collections.ArrayList]$EventsArr = Get-WinEvent -ErrorAction SilentlyContinue -FilterHashtable @{
+            LogName = "Security"
+            Id = 5150,5152,5153,5156,5157
+            StartTime = $StartDateTime
+            EndTime = $EndDateTime
+        }
+
+        $matchArray = ($TextBox_MatchText.Text -split ",")
+        $matchArrayPos = $matchArray.Where({ $_[0] -ne "!" })
+        $tmpArrayNeg = $matchArray.where({ $_[0] -eq "!" })
+        $matchArrayNeg = New-Object System.Collections.ArrayList($null) ; $tmpArrayNeg | % {$matchArrayNeg += $_.replace("!","")}
+        $Protocols =  @{[UInt32]0 = "HOPOPT" ; [UInt32]1 = "ICMP" ; [UInt32]2 = "IGMP"; [UInt32]4 = "IP encapsulation" ; [UInt32]6 = "TCP"; [UInt32]17 = "UDP" ; [UInt32]58 = "IPv6-ICMP"}
+        $FWActions = @{[int64]-9214364837600034816 = "Allow" ; [int64]-9218868437227405312 = "Deny"}
+        $ActionsColor = @{[int64]-9214364837600034816 = "White" ; [int64]-9218868437227405312 = "DarkGray"}
+        $FWDirections = @{"%%14593" = "OUT" ; "%%14592" = "IN"}
+        $PrivateAddresses = '(^127\.)|(^192\.168\.)|(^169\.254\.)|(^10\.)|(^224\.)|(^240\.)|(^172\.1[6-9]\.)|(^172\.2[0-9]\.)|(^172\.3[0-1]\.)|(^::1$)|(^[fF][cCdD])|(2(?:2[4-9]|3\d)(?:\.(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]\d?|0)){3}$)|(255.255.255.255)'
+        $EventsArr | % {
+            $EventRecord = $_
+            $appFullPath = $EventRecord.Properties[1].Value
+            $appName = $appFullPath.Substring($appFullPath.LastIndexOf("\") + 1)
+            if ($appName -eq "svchost.exe") {
+                Try { $appName += "|$( $TasklistOut.Where({$_.Split(",")[1] -eq [string]$EventRecord.Properties[0].Value}).Split(",")[2] )" } catch {$appName += "|-"}
+                $appFullPath += $appName.Substring(11)
+            }
+            $EventRecordXML = [xml]$EventRecord.ToXml()
+            $outstr = @($( `
+            $EventRecord.RecordID, `
+            $EventRecord.TimeCreated.ToString("yyyy/MM/dd HH:mm:ss"), `
+            [string]$EventRecord.Properties[0].Value, `
+            $appFullPath, `
+            $appname, `
+            $("FilterId:" + ((($EventRecordXML).Event.EventData.Data.Where({$_.Name -eq "FilterRTID"})).'#text')), `
+            $($FWActions.($EventRecord.Keywords)), `
+            $($FWDirections.($EventRecord.Properties[2].Value)), `
+            $EventRecord.Properties[3].Value, `
+            $( ([object[]]($DNSCache.Where({$_.Data -eq $EventRecord.Properties[3].Value}))[0]).Name ), `
+            $EventRecord.Properties[4].Value, `
+            $EventRecord.Properties[5].Value, `
+
+            $( ([object[]]($DNSCache.Where({$_.Data -eq $EventRecord.Properties[5].Value}))[0]).Name ), `
+            $EventRecord.Properties[6].Value, `
+            $($Protocols.$($EventRecord.Properties[7].Value)), `
+            $((($EventRecordXML).Event.EventData.Data.Where({$_.Name -eq "InterfaceIndex"})).'#text') ))
+
+            # Apply filters
+            $EventFiltered = $false
+
+            if ((-Not $CheckBox_IPv4.IsChecked) -and ($outstr[8].Indexof(":") -eq -1) -and ($outstr[11].Indexof(":") -eq -1)) {$EventFiltered = $true}
+            if ((-Not $CheckBox_IPv6.IsChecked) -and ($outstr[8].Indexof(":") -ne -1) -and ($outstr[11].Indexof(":") -ne -1)) {$EventFiltered = $true}
+            if ((-Not $CheckBox_DNS.IsChecked) -and ($DNSServers.IndexOf($outstr[11]) -ne -1) -and (($outstr[13] -eq "53") -or ($outstr[13] -eq "5353"))) {$EventFiltered = $true}
+            if ((-Not $CheckBox_DHCP.IsChecked) -and ((($outstr[10] -eq "68") -and ($outstr[13] -eq "67")) -or (($outstr[8].Indexof(":") -ne -1) -and (($outstr[10] -eq "546") -or ($outstr[13] -eq "547")))) -and ($outstr[14] -eq "UDP")) {$EventFiltered = $true}
+            
+            $SourceIPIsPrivate = $outstr[8] -match $PrivateAddresses
+            $DestIPIsPrivate = $outstr[11] -match $PrivateAddresses
+            if (-Not $CheckBox_Other.IsChecked) {
+                If ($SourceIPIsPrivate -and $DestIPIsPrivate) {$EventFiltered = $true}
+            }
+            if (-Not $CheckBox_Global.IsChecked) {
+                If ((-Not $SourceIPIsPrivate) -or (-Not $DestIPIsPrivate)) {$EventFiltered = $true}
+            }
+                    
+            if ($TextBox_MatchText.Text -ne "") {
+                If ($matchArrayNeg.Count -ne 0) {
+                    If ( ($matchArrayNeg.Where({ $outstr[1,2,4,5,6,7,8,9,10,11,12,13,14,15] -match $_ })).Count -gt 0 ) {
+                        $EventFiltered = $true
+                    }
+                }
+                If ($matchArrayPos.Count -ne 0) {
+                    If ( ($matchArrayPos.Where({ $outstr[1,2,4,5,6,7,8,9,10,11,12,13,14,15] -match $_ })).Count -ne $matchArrayPos.Count ) {
+                        $EventFiltered = $true
+                    }
+                }
+            }
+
+            If (-Not $EventFiltered) {
+                $Global:EventsArr.Add($(@($outStr[0];[string[]]($outStr[1] -split " ");[string[]]$outStr[2,3,5,6,7,8,9,10,11,12,13,14,15]) -join ";"))
+
+                #Out-Console
+                $ForegroundMarkColor = "Yellow"
+                if ($TextBox_MarkText.Text -eq "") {
+                    Write-Host $($outstr[1,2,4,5,6,7,8,9,10,11,12,13,14,15]) -ForegroundColor $($ActionsColor.($EventRecord.Keywords))
+                } else {
+                    $markArray = ($TextBox_MarkText.Text -split ",")
+                    If ( $markArray.Where({ $outstr[1,2,4,5,6,7,8,9,10,11,12,13,14,15] -match $_ }) ) {
+                        ForEach ($element in $outstr[1,2,4,5,6,7,8,9,10,11,12,13,14,15]) {
+                            If ( $markArray.Where({ $element -match $_ }) ) {$fColor = $ForegroundMarkColor} else {$fColor = $ActionsColor.($EventRecord.Keywords)}
+                            Write-Host ($element + " ") -ForegroundColor $fColor -BackgroundColor "DarkGreen" -NoNewline
+                        }
+                        Write-Host
+                    }
+                    else {
+                        Write-Host $($outstr[1,2,4,5,6,7,8,9,10,11,12,13,14,15]) -ForegroundColor $ActionsColor.($EventRecord.Keywords)
+                    }
+                }   
+            }
+        }
+
+        $Button_Go.IsEnabled = $true
+        Write-Host "Waiting for commands" -ForegroundColor $MessagesColor
+    }
+})
+
+# ButtonExit
+$Button_Exit.add_Click.Invoke({
+    (get-host).UI.RawUI.WindowTitle = $initial_console_title
+    Try {
+        $Global:Watcher.Enabled = $False
+        Get-EventSubscriber | Remove-Event
+        $Global:psCmd_Events.EndStop($Global:psCmd_Events.BeginStop($null,$Runspace_Events_Handle))
+        $psCmd_TaskList.EndStop($psCmd_TaskList.BeginStop($null,$Runspace_TaskList_Handle))
+        $psCmd_DNSCache.EndStop($psCmd_DNSCache.BeginStop($null,$Runspace_DNSCache_Handle))
+        $Global:psCmd.Runspace.Dispose()
+        $psCmd_TaskList.Runspace.Dispose()
+        $psCmd_DNSCache.Runspace.Dispose()
+    } catch {}
+
+    Get-ChildItem -Path "$env:TEMP\fwmon*" | ForEach-Object {Remove-Item $_ -Force -ErrorAction SilentlyContinue}
+    Write-Host "`nGoodbye!"
+    $Window_main.OwnedWindows | % {$_.Close()}
+    $Window_main.Close()
+    Exit
+})
+
 $CheckBox_Past.Add_Checked({
+    $hashtable_Events.Parent_TaskList | Out-Host #!
     if (-Not ($Global:DateTimeAlreadySetted)) { # Установка начальных дат Since и Till в $Windows_PastEvents
         $Global:DateTimeAlreadySetted = $true
         $Now = Get-Date
@@ -274,7 +703,7 @@ $Window_Main_TextBox_Buffer.Add_PreviewTextInput({
 $Window_Main_TextBox_Buffer.Add_TextChanged({
     if ($Window_Main_TextBox_Buffer.Text -eq "") {$Window_Main_TextBox_Buffer.Text = "0"}
     $Global:EventsArrMaxLength = [int32]$Window_Main_TextBox_Buffer.Text
-    $SyncHash.Parent_EventsArrMaxLength = $Global:EventsArrMaxLength
+    $hashtable_Events.Parent_EventsArrMaxLength = $Global:EventsArrMaxLength
 })
 
 $PastEventsWindow_TextBox_SY.Add_GotFocus({ $this.SelectionStart = 0 ; $this.SelectionLength =  $this.Text.Length })
@@ -341,66 +770,66 @@ $PastEventsWindow_TextBox_last.Add_TextChanged({NDigitsTextBox $this $this 6})
 
 # CheckBox_IPv4
 $CheckBox_IPv4.Add_Checked({
-    Try {$SyncHash.Parent_CheckBox_IPv4_IsChecked = $CheckBox_IPv4.IsChecked} catch {}
+    Try {$hashtable_Events.Parent_CheckBox_IPv4_IsChecked = $CheckBox_IPv4.IsChecked} catch {}
     $CheckBox_IPv6.IsEnabled = $true
 })
 $CheckBox_IPv4.Add_UnChecked({
-    Try {$SyncHash.Parent_CheckBox_IPv4_IsChecked = $CheckBox_IPv4.IsChecked} catch {}
+    Try {$hashtable_Events.Parent_CheckBox_IPv4_IsChecked = $CheckBox_IPv4.IsChecked} catch {}
     $CheckBox_IPv6.IsEnabled = $false
 })
 
 # CheckBox_IPv6
 $CheckBox_IPv6.Add_Checked({
-    Try {$SyncHash.Parent_CheckBox_IPv6_IsChecked = $CheckBox_IPv6.IsChecked} catch {}
+    Try {$hashtable_Events.Parent_CheckBox_IPv6_IsChecked = $CheckBox_IPv6.IsChecked} catch {}
     $CheckBox_IPv4.IsEnabled = $true
 })
 $CheckBox_IPv6.Add_UnChecked({
-    Try {$SyncHash.Parent_CheckBox_IPv6_IsChecked = $CheckBox_IPv6.IsChecked} catch {}
+    Try {$hashtable_Events.Parent_CheckBox_IPv6_IsChecked = $CheckBox_IPv6.IsChecked} catch {}
     $CheckBox_IPv4.IsEnabled = $false
 })
 
 # CheckBox_DNS
 $CheckBox_DNS.Add_Checked({
-    Try {$SyncHash.Parent_CheckBox_DNS_IsChecked = $CheckBox_DNS.IsChecked} catch {}
+    Try {$hashtable_Events.Parent_CheckBox_DNS_IsChecked = $CheckBox_DNS.IsChecked} catch {}
 })
 $CheckBox_DNS.Add_UnChecked({
-    Try {$SyncHash.Parent_CheckBox_DNS_IsChecked = $CheckBox_DNS.IsChecked} catch {}
+    Try {$hashtable_Events.Parent_CheckBox_DNS_IsChecked = $CheckBox_DNS.IsChecked} catch {}
 })
 
 # CheckBox_DHCP
 $CheckBox_DHCP.Add_Checked({
-    Try {$SyncHash.Parent_CheckBox_DHCP_IsChecked = $CheckBox_DHCP.IsChecked} catch {}
+    Try {$hashtable_Events.Parent_CheckBox_DHCP_IsChecked = $CheckBox_DHCP.IsChecked} catch {}
 })
 $CheckBox_DHCP.Add_UnChecked({
-    Try {$SyncHash.Parent_CheckBox_DHCP_IsChecked = $CheckBox_DHCP.IsChecked} catch {}
+    Try {$hashtable_Events.Parent_CheckBox_DHCP_IsChecked = $CheckBox_DHCP.IsChecked} catch {}
 })
 
 # CheckBox_Other
 $CheckBox_Other.Add_Checked({
-    Try {$SyncHash.Parent_CheckBox_Other_IsChecked = $CheckBox_Other.IsChecked} catch {}
+    Try {$hashtable_Events.Parent_CheckBox_Other_IsChecked = $CheckBox_Other.IsChecked} catch {}
 })
 $CheckBox_Other.Add_UnChecked({
-    Try {$SyncHash.Parent_CheckBox_Other_IsChecked = $CheckBox_Other.IsChecked} catch {}
+    Try {$hashtable_Events.Parent_CheckBox_Other_IsChecked = $CheckBox_Other.IsChecked} catch {}
 })
 
 # CheckBox_Global
 $CheckBox_Global.Add_Checked({
-    Try {$SyncHash.Parent_CheckBox_Global_IsChecked = $CheckBox_Global.IsChecked} catch {}
+    Try {$hashtable_Events.Parent_CheckBox_Global_IsChecked = $CheckBox_Global.IsChecked} catch {}
 })
 $CheckBox_Global.Add_UnChecked({
-    Try {$SyncHash.Parent_CheckBox_Global_IsChecked = $CheckBox_Global.IsChecked} catch {}
+    Try {$hashtable_Events.Parent_CheckBox_Global_IsChecked = $CheckBox_Global.IsChecked} catch {}
 })
 
 # TextBox_MarkText
 $TextBox_MarkText.AddHandler([System.Windows.Controls.Primitives.TextBoxBase]::TextChangedEvent,[System.Windows.RoutedEventHandler]`
 {
-    Try {$SyncHash.Parent_TextBox_MarkText_Text = $TextBox_MarkText.Text} catch {}
+    Try {$hashtable_Events.Parent_TextBox_MarkText_Text = $TextBox_MarkText.Text} catch {}
 })
 
 # TextBox_MatchText
 $TextBox_MatchText.AddHandler([System.Windows.Controls.Primitives.TextBoxBase]::TextChangedEvent,[System.Windows.RoutedEventHandler]`
 {
-    Try {$SyncHash.Parent_TextBox_MatchText_Text = $TextBox_MatchText.Text} catch {}
+    Try {$hashtable_Events.Parent_TextBox_MatchText_Text = $TextBox_MatchText.Text} catch {}
 })
 
 # Button_Stop
@@ -411,10 +840,9 @@ $Button_Stop.add_Click.Invoke({
     #$Global:psCmd.EndStop($Global:psCmd.BeginStop($null,$Global:RunspaceHandle))
     Write-Host $((Get-Date).ToString("yyyy/MM/dd HH:mm:ss")) -no ; Write-Host " Stop Events subscriber" -ForegroundColor $MessagesColor
     Write-Host "Waiting for commands" -ForegroundColor $MessagesColor
-
 })
 
-# Buttins since и till
+# Buttons since and till
 $PastEventsWindow_Button_since.add_Click({
     $Now = Get-Date
     $PastEventsWindow_TextBox_SY.Text = ($now.Year).tostring("0000")
@@ -423,7 +851,6 @@ $PastEventsWindow_Button_since.add_Click({
     $PastEventsWindow_TextBox_SH.Text = (0).tostring("00")
     $PastEventsWindow_TextBox_SMt.Text = (0).tostring("00")
     $PastEventsWindow_TextBox_SS.Text = (0).tostring("00")
-    Remove-Variable Now
 })
 $PastEventsWindow_Button_till.add_Click({
     $Now = Get-Date
@@ -433,7 +860,6 @@ $PastEventsWindow_Button_till.add_Click({
     $PastEventsWindow_TextBox_TH.Text = ($now.Hour).tostring("00")
     $PastEventsWindow_TextBox_TMt.Text = ($now.Minute).tostring("00")
     $PastEventsWindow_TextBox_TS.Text = ($now.Second).tostring("00")
-    Remove-Variable Now
 })
 
 # toTXT
@@ -448,11 +874,10 @@ $Button_outTXT.add_Click.Invoke({
 # toExcel
 $Button_outExcel.add_Click.Invoke({
     Try{
-        Get-ChildItem -Path "$env:TEMP\fwmon*.t*" | ForEach-Object {Remove-Item $_ -Force -ErrorAction SilentlyContinue}
-        Get-ChildItem -Path "$env:TEMP\fwmon*.xlsx" | ForEach-Object {Remove-Item $_ -Force -ErrorAction SilentlyContinue}
+        Get-ChildItem -Path "$env:TEMP\fwmon*" | ForEach-Object {Remove-Item $_ -Force -ErrorAction SilentlyContinue}
         $FileName = "$env:TEMP\fwmon_" + (Get-Date).ToString("yyyyMMdd-HHmmss") + ".txt"
         "RecordID;Date;Time;ProcessID;ApplicationFullPath;FirewallRule#;Action;Direction;SourceAddress;SourceDNSName;SourcePort;DestinationAddress;DestinationDNSName;DestinationPort;Protocol;InterfaceIndex" | Out-File $FileName
-        $SyncHash.Parent_EventsArr | Out-File $FileName -Append
+        $hashtable_Events.Parent_EventsArr | Out-File $FileName -Append
 
         Write-Host $((Get-Date).ToString("yyyy/MM/dd HH:mm:ss")) -no ; Write-Host " Start converting data to Excel file" -ForegroundColor $MessagesColor
         $excelObject = New-Object -ComObject Excel.Application
@@ -469,7 +894,7 @@ $Button_outExcel.add_Click.Invoke({
         $worksheet.Columns.AutoFit() | Out-Null
         $headerRange = $worksheet.Range("A1","P1")
         $headerRange.AutoFilter() | Out-Null
-        $table = $excelObject.ActiveSheet.ListObjects.Add([Microsoft.Office.Interop.Excel.XlListObjectSourceType]::xlSrcRange, $excelObject.ActiveCell.CurrentRegion, $null ,[Microsoft.Office.Interop.Excel.XlYesNoGuess]::xlYes)
+        #$table = $excelObject.ActiveSheet.ListObjects.Add([Microsoft.Office.Interop.Excel.XlListObjectSourceType]::xlSrcRange, $excelObject.ActiveCell.CurrentRegion, $null ,[Microsoft.Office.Interop.Excel.XlYesNoGuess]::xlYes)
         $xlsxFile = $FileName.replace(".txt",".xlsx")
         $Workbook.SaveAs($xlsxFile, 51)
         $Workbook.Close()
@@ -477,465 +902,9 @@ $Button_outExcel.add_Click.Invoke({
         Write-Host $((Get-Date).ToString("yyyy/MM/dd HH:mm:ss")) -no ; Write-Host " Stop converting data to Excel file" -ForegroundColor $MessagesColor
         Write-Host $((Get-Date).ToString("yyyy/MM/dd HH:mm:ss")) -no ; Write-Host " Opening Excel file ..." -ForegroundColor $MessagesColor
         Start $xlsxFile
-        Write-Host "`nWaiting for commands" -ForegroundColor $MessagesColor
     }
     catch {[System.Windows.MessageBox]::Show($_.Exception)}
 })
-
-# ButtonRules
-$Button_FilterId.add_Click.Invoke({
-    $filepath = "$env:TMP\filters.xml"
-    If (Test-Path $filepath) {Remove-Item -Path $filepath -Force}
-    $Arguments = "/c netsh wfp show filter file = " + $filepath
-    Try {
-        Start-Process -FilePath ($env:SystemRoot + "\System32\cmd.exe") -ArgumentList $Arguments -Verb runAs
-        $Locked = $True
-                                        Do {
-        Start-Sleep -Milliseconds 100
-        If (Test-Path $filepath) {
-            try {
-                [IO.File]::OpenWrite($filepath).close()
-                $Locked = $False
-            } catch {}
-        }
-    } While ($Locked)
-    
-        [System.Collections.ArrayList]$AllFilters = @()
-        $Filters = Select-Xml -Path $filepath -XPath "/wfpdiag/filters/item"
-
-                $Filters | % {
-        $AllFilters += New-Object -Type PSObject -Prop @{ ‘FilterId’ = $_.Node.filterId ; ‘Name’ = $_.Node.DisplayData.Name ; ‘Description’ = $_.Node.DisplayData.Description ; ‘Action’ = $_.Node.Action.Type}
-    }
-        $AllFilters | Sort filterId | Select filterId,Name,Description,Action | Out-GridView -Title "All Filters"
-
-        Remove-Item -Path $filepath -Force
-    } catch {}
-})
-
-# ButtonExit
-$Button_Exit.add_Click.Invoke({
-    (get-host).UI.RawUI.WindowTitle = $initial_console_title
-    Try {
-        $Global:psCmd.EndStop($Global:psCmd.BeginStop($null,$Global:RunspaceHandle))
-        Get-EventSubscriber | Remove-Event
-        $Global:Watcher.Enabled = $False
-    } catch {}
-
-    Get-ChildItem -Path "$env:TEMP\fwmon*.t*" | ForEach-Object {Remove-Item $_ -Force -ErrorAction SilentlyContinue}
-    Write-Host "`nGoodbye!"
-    $Window_main.OwnedWindows | % {$_.Close()}
-    $Window_main.Close()
-    Exit
-})
-
-# Button_Hide
-$Button_Hide.add_Click.Invoke({
-    
-    <#
-    Add-Type -Name Window -Namespace Console -MemberDefinition '
-    [DllImport("Kernel32.dll")]
-    public static extern IntPtr GetConsoleWindow();
-
-    [DllImport("user32.dll")]
-    public static extern bool ShowWindow(IntPtr hWnd, Int32 nCmdShow);
-    '
-
-    $consolePtr = [Console.Window]::GetConsoleWindow()
-    # Hide = 0,
-    # ShowNormal = 1,
-    # ShowMinimized = 2,
-    # ShowMaximized = 3,
-    # Maximize = 3,
-    # ShowNormalNoActivate = 4,
-    # Show = 5,
-    # Minimize = 6,
-    # ShowMinNoActivate = 7,
-    # ShowNoActivate = 8,
-    # Restore = 9,
-    # ShowDefault = 10,
-    # ForceMinimized = 11
-    [Console.Window]::ShowWindow($consolePtr, 2) | Out-Null
-    #>
-
-    $Window_main.WindowState = "Minimized"
-})
-
-# ButtonSecPol
-$ButtonSecPol.add_Click.Invoke({ Start-Process -FilePath ($env:SystemRoot+"\system32\mmc.exe") -ArgumentList $("$Env:SystemRoot\System32\secpol.msc") -Verb runAs })
-
-# ButtonWF
-$ButtonWF.add_Click.Invoke({
-    Try {
-        Start-Process -FilePath ($env:SystemRoot+"\system32\mmc.exe") -ArgumentList ($env:SystemRoot+"\system32\wf.msc") -Verb runAs
-    } catch {}
-})
-
-# Button_Go
-$Button_Go.add_Click.Invoke({
-    Write-Host $((Get-Date).ToString("yyyy/MM/dd HH:mm:ss")) -no ; Write-Host " Start Events subscriber" -ForegroundColor $MessagesColor
-    $Button_Go.IsEnabled = $false
-    $Button_outTXT.IsEnabled = $true
-
-    [System.Collections.ArrayList]$DNSServers = @()
-    $DNSServers += (Get-DnsClientServerAddress).ServerAddresses
-    $Global:EventsArr.Clear()
-
-    if (-Not ($CheckBox_Past.IsChecked)) { # realtime monitor
-        $Button_Stop.IsEnabled = $true
-        $SyncHash.Parent_DNSServers = $DNSServers
-        $Global:Watcher.Enabled = $true
-    } else { # Past Events query
-        $EndDateTime = Get-Date
-        If ($PastEventsWindow_CheckBox_last.IsChecked) {
-            $CheckedRadioButton = ($PastEventsWindow_StackPanel_Lower.Children | ? {$_.IsChecked}).Name
-            Switch ($CheckedRadioButton) {
-                "RadioButton_minutes" {$StartDateTime = $EndDateTime.AddMinutes(-([int]($PastEventsWindow_TextBox_last.Text)))}
-                "RadioButton_hours" {$StartDateTime = $EndDateTime.AddHours(-([int]($PastEventsWindow_TextBox_last.Text)))}
-                "RadioButton_days" {$StartDateTime = $EndDateTime.AddDays(-([int]($PastEventsWindow_TextBox_last.Text)))}
-            }
-        }
-        else {
-            $StartDateTime = Get-Date -Year $PastEventsWindow_TextBox_SY.Text -Month $PastEventsWindow_TextBox_SM.Text -Day $PastEventsWindow_TextBox_SD.Text -Hour $PastEventsWindow_TextBox_SH.Text -Minute $PastEventsWindow_TextBox_SMt.Text -Second $PastEventsWindow_TextBox_SS.Text
-            $EndDateTime = Get-Date -Year $PastEventsWindow_TextBox_TY.Text -Month $PastEventsWindow_TextBox_TM.Text -Day $PastEventsWindow_TextBox_TD.Text -Hour $PastEventsWindow_TextBox_TH.Text -Minute $PastEventsWindow_TextBox_TMt.Text -Second $PastEventsWindow_TextBox_TS.Text
-        }
-
-        Write-Host "Reading event log" -ForegroundColor $MessagesColor
-        [System.Collections.ArrayList]$EventsArr = Get-WinEvent -ErrorAction SilentlyContinue -FilterHashtable @{
-            LogName = "Security"
-            Id = 5150,5152,5153,5156,5157
-            StartTime = $StartDateTime
-            EndTime = $EndDateTime
-        }
-
-        $matchArray = ($TextBox_MatchText.Text -split ",")
-        $matchArrayPos = $matchArray.Where({ $_[0] -ne "!" })
-        $tmpArrayNeg = $matchArray.where({ $_[0] -eq "!" })
-        $matchArrayNeg = New-Object System.Collections.ArrayList($null) ; $tmpArrayNeg | % {$matchArrayNeg += $_.replace("!","")}
-        $Protocols =  @{[UInt32]0 = "HOPOPT" ; [UInt32]1 = "ICMP" ; [UInt32]2 = "IGMP"; [UInt32]4 = "IP encapsulation" ; [UInt32]6 = "TCP"; [UInt32]17 = "UDP" ; [UInt32]58 = "IPv6-ICMP"}
-        $FWActions = @{[int64]-9214364837600034816 = "Allow" ; [int64]-9218868437227405312 = "Deny"}
-        $ActionsColor = @{[int64]-9214364837600034816 = "White" ; [int64]-9218868437227405312 = "DarkGray"}
-        $FWDirections = @{"%%14593" = "OUT" ; "%%14592" = "IN"}
-        $PrivateAddresses = '(^127\.)|(^192\.168\.)|(^169\.254\.)|(^10\.)|(^224\.)|(^240\.)|(^172\.1[6-9]\.)|(^172\.2[0-9]\.)|(^172\.3[0-1]\.)|(^::1$)|(^[fF][cCdD])|(2(?:2[4-9]|3\d)(?:\.(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]\d?|0)){3}$)|(255.255.255.255)'
-        $EventsArr | % {
-            $EventRecord = $_
-            $appFullPath = $EventRecord.Properties[1].Value
-            $appName = $appFullPath.Substring($appFullPath.LastIndexOf("\") + 1)
-            if ($appName -eq "svchost.exe") {
-                Try { $appName += "|$( $TasklistOut.Where({$_.Split(",")[1] -eq [string]$EventRecord.Properties[0].Value}).Split(",")[2] )" } catch {$appName += "|-"}
-                $appFullPath += $appName.Substring(11)
-            }
-            $EventRecordXML = [xml]$EventRecord.ToXml()
-            $outstr = @($( `
-            $EventRecord.RecordID, `
-            $EventRecord.TimeCreated.ToString("yyyy/MM/dd HH:mm:ss"), `
-            [string]$EventRecord.Properties[0].Value, `
-            $appFullPath, `
-            $appname, `
-            $("FilterId:" + ((($EventRecordXML).Event.EventData.Data.Where({$_.Name -eq "FilterRTID"})).'#text')), `
-            $($FWActions.($EventRecord.Keywords)), `
-            $($FWDirections.($EventRecord.Properties[2].Value)), `
-            $EventRecord.Properties[3].Value, `
-            $( ([object[]]($DNSCache.Where({$_.Data -eq $EventRecord.Properties[3].Value}))[0]).Name ), `
-            $EventRecord.Properties[4].Value, `
-            $EventRecord.Properties[5].Value, `
-
-            $( ([object[]]($DNSCache.Where({$_.Data -eq $EventRecord.Properties[5].Value}))[0]).Name ), `
-            $EventRecord.Properties[6].Value, `
-            $($Protocols.$($EventRecord.Properties[7].Value)), `
-            $((($EventRecordXML).Event.EventData.Data.Where({$_.Name -eq "InterfaceIndex"})).'#text') ))
-
-            # Применение фильтров
-            $EventFiltered = $false
-
-            if ((-Not $CheckBox_IPv4.IsChecked) -and ($outstr[8].Indexof(":") -eq -1) -and ($outstr[11].Indexof(":") -eq -1)) {$EventFiltered = $true}
-            if ((-Not $CheckBox_IPv6.IsChecked) -and ($outstr[8].Indexof(":") -ne -1) -and ($outstr[11].Indexof(":") -ne -1)) {$EventFiltered = $true}
-            if ((-Not $CheckBox_DNS.IsChecked) -and ($DNSServers.IndexOf($outstr[11]) -ne -1) -and (($outstr[13] -eq "53") -or ($outstr[13] -eq "5353"))) {$EventFiltered = $true}
-            if ((-Not $CheckBox_DHCP.IsChecked) -and ((($outstr[10] -eq "68") -and ($outstr[13] -eq "67")) -or (($outstr[8].Indexof(":") -ne -1) -and (($outstr[10] -eq "546") -or ($outstr[13] -eq "547")))) -and ($outstr[14] -eq "UDP")) {$EventFiltered = $true}
-            
-            $SourceIPIsPrivate = $outstr[8] -match $PrivateAddresses
-            $DestIPIsPrivate = $outstr[11] -match $PrivateAddresses
-            if (-Not $CheckBox_Other.IsChecked) {
-                If ($SourceIPIsPrivate -and $DestIPIsPrivate) {$EventFiltered = $true}
-            }
-            if (-Not $CheckBox_Global.IsChecked) {
-                If ((-Not $SourceIPIsPrivate) -or (-Not $DestIPIsPrivate)) {$EventFiltered = $true}
-            }
-                    
-            if ($TextBox_MatchText.Text -ne "") {
-                If ($matchArrayNeg.Count -ne 0) {
-                    If ( ($matchArrayNeg.Where({ $outstr[1,2,4,5,6,7,8,9,10,11,12,13,14,15] -match $_ })).Count -gt 0 ) {
-                        $EventFiltered = $true
-                    }
-                }
-                If ($matchArrayPos.Count -ne 0) {
-                    If ( ($matchArrayPos.Where({ $outstr[1,2,4,5,6,7,8,9,10,11,12,13,14,15] -match $_ })).Count -ne $matchArrayPos.Count ) {
-                        $EventFiltered = $true
-                    }
-                }
-            }
-
-            If (-Not $EventFiltered) {
-                $Global:EventsArr.Add($(@($outStr[0];[string[]]($outStr[1] -split " ");[string[]]$outStr[2,3,5,6,7,8,9,10,11,12,13,14,15]) -join ";"))
-
-                #Out-Console
-                $ForegroundMarkColor = "Yellow"
-                if ($TextBox_MarkText.Text -eq "") {
-                    Write-Host $($outstr[1,2,4,5,6,7,8,9,10,11,12,13,14,15]) -ForegroundColor $($ActionsColor.($EventRecord.Keywords))
-                } else {
-                    $markArray = ($TextBox_MarkText.Text -split ",")
-                    If ( $markArray.Where({ $outstr[1,2,4,5,6,7,8,9,10,11,12,13,14,15] -match $_ }) ) {
-                        ForEach ($element in $outstr[1,2,4,5,6,7,8,9,10,11,12,13,14,15]) {
-                            If ( $markArray.Where({ $element -match $_ }) ) {$fColor = $ForegroundMarkColor} else {$fColor = $ActionsColor.($EventRecord.Keywords)}
-                            Write-Host ($element + " ") -ForegroundColor $fColor -BackgroundColor "DarkGreen" -NoNewline
-                        }
-                        Write-Host
-                    }
-                    else {
-                        Write-Host $($outstr[1,2,4,5,6,7,8,9,10,11,12,13,14,15]) -ForegroundColor $ActionsColor.($EventRecord.Keywords)
-                    }
-                }   
-            }
-        }
-
-        $Button_Go.IsEnabled = $true
-        Write-Host "Waiting for commands" -ForegroundColor $MessagesColor
-    }
-})
-
-$Query = @"
-<QueryList>
-    <Query Id="0" Path="Security">
-    <Select Path="Security">*[System[(EventID=5150 or EventID=5152 or EventID=5153 or EventID=5156 or EventID=5157)]]</Select>
-    </Query>
-</QueryList>
-"@
-
-$subscriptionQuery = [System.Diagnostics.Eventing.Reader.EventLogQuery]::new("Security",[System.Diagnostics.Eventing.Reader.PathType]::LogName,$Query)
-[System.Diagnostics.Eventing.Reader.EventLogWatcher]$Global:Watcher = [System.Diagnostics.Eventing.Reader.EventLogWatcher]::new($subscriptionQuery)
-
-# Thread for getting svchost instances to array $TasklistOut
-[string[]]$TasklistOut = (Tasklist /svc /fo csv /nh /fi "imagename eq svchost.exe").Replace('"',"")
-$SyncHash2 = [hashtable]::Synchronized(@{ Parent_TaskListOut = $TasklistOut ; Parent_Watcher = $Global:Watcher ; Parent_ConsoleHost = (Get-Host)})
-$newRunspace2 =[runspacefactory]::CreateRunspace()
-$newRunspace2.ApartmentState = "STA"
-$newRunspace2.ThreadOptions = "Default"         
-$newRunspace2.Open()
-$newRunspace2.SessionStateProxy.SetVariable("SyncHash2",$SyncHash2)
-$psCmd2 = [PowerShell]::Create()
-$Hide2 = $psCmd2.AddScript({
-    $queryParameters = '__InstanceCreationEvent', (New-Object TimeSpan 0,0,1), "TargetInstance isa 'Win32_Process'"
-    $Query = New-Object System.Management.WqlEventQuery -ArgumentList $queryParameters
-    $ProcessWatcher = New-Object System.Management.ManagementEventWatcher $Query
-    $newEventArgs = @{
-        SourceIdentifier = 'PowerShell.ProcessCreated'
-        Sender = $Sender
-        EventArguments = $EventArgs.NewEvent.TargetInstance
-    }
-
-    Register-ObjectEvent -InputObject $ProcessWatcher -EventName "EventArrived" -Action { 
-        if ($SyncHash2.Parent_Watcher.Enabled -and ($EventArgs.NewEvent.TargetInstance.Description -eq "svchost.exe")) {
-            $SyncHash2.Parent_TaskListOut = (Tasklist /svc /fo csv /nh /fi "imagename eq svchost.exe").Replace('"',"")
-            #$SyncHash2.Parent_ConsoleHost.Ui.WriteLine("************************")
-        }
-    }
-
-    $queryParameters2 = '__InstanceDeletionEvent', (New-Object TimeSpan 0,0,1), "TargetInstance isa 'Win32_Process'"
-    $Query2 = New-Object System.Management.WqlEventQuery -ArgumentList $queryParameters2
-    $ProcessWatcher2 = New-Object System.Management.ManagementEventWatcher $query2
-    $newEventArgs2 = @{
-        SourceIdentifier = 'PowerShell.ProcessCreated'
-        Sender = $Sender
-        EventArguments = $EventArgs.NewEvent.TargetInstance
-    }
-
-    Register-ObjectEvent -InputObject $ProcessWatcher2 -EventName "EventArrived" -Action {
-        if ($SyncHash2.Parent_Watcher.Enabled -and ($EventArgs.NewEvent.TargetInstance.Description -eq "svchost.exe")) {
-            $SyncHash2.Parent_TaskListOut = (Tasklist /svc /fo csv /nh /fi "imagename eq svchost.exe").Replace('"',"")
-            #$SyncHash2.Parent_ConsoleHost.Ui.WriteLine("************************")
-        }
-    }
-})
-$psCmd2.Runspace = $newRunspace2
-$RunspaceHandle2 = $psCmd2.BeginInvoke()
-
-# Thread for getting DNS cache to array $DNSCache
-$DNSCache = Try {Get-DnsClientCache -Type $("A","AAAA") -ea 0 | Select Name,Data} catch {}
-$SyncHash3 = [hashtable]::Synchronized(@{ Parent_DNSCache = $DNSCache ; Parent_Watcher = $Global:Watcher })
-$newRunspace3 =[runspacefactory]::CreateRunspace()
-$newRunspace3.ApartmentState = "STA"
-$newRunspace3.ThreadOptions = "Default"         
-$newRunspace3.Open()
-$newRunspace3.SessionStateProxy.SetVariable("SyncHash3",$SyncHash3)
-$psCmd3 = [PowerShell]::Create()
-$Hide3 = $psCmd3.AddScript({
-    Do {
-        if ($SyncHash3.Parent_Watcher.Enabled) { $SyncHash3.Parent_DNSCache = $(Try {Get-DnsClientCache -Type $("A","AAAA") -ea 0 | Select Name,Data} catch {}) | Select Name,Data } ; Start-Sleep 3
-    } Until ($Something)
-})
-$psCmd3.Runspace = $newRunspace3
-$RunspaceHandle3 = $psCmd3.BeginInvoke()
-
-# Thread for catching Security Log Events
-$SyncHash = [hashtable]::Synchronized(@{
-    Parent_ConsoleHost = (Get-Host)
-    Parent_Window_main = $Window_main
-    MessagesColor = $MessagesColor
-    Parent_Button_outTXT = $Button_outTXT
-    Parent_CheckBox_IPv4_IsChecked = $CheckBox_IPv4.IsChecked
-    Parent_CheckBox_IPv6_IsChecked = $CheckBox_IPv6.IsChecked
-    Parent_CheckBox_DNS_IsChecked = $CheckBox_DNS.IsChecked
-    Parent_CheckBox_DHCP_IsChecked = $CheckBox_DHCP.IsChecked
-    Parent_CheckBox_Local_IsChecked = $CheckBox_Local.IsChecked
-    Parent_CheckBox_Other_IsChecked = $CheckBox_Other.IsChecked
-    Parent_CheckBox_Global_IsChecked = $CheckBox_Global.IsChecked
-    Parent_TextBox_MarkText_Text = $TextBox_MarkText.Text
-    Parent_TextBox_MatchText_Text = $TextBox_MatchText.Text
-    Parent_MessagesColor = $MessagesColor
-    Parent_Watcher = $Global:Watcher
-    Parent_EventsArr = $Global:EventsArr
-    Parent_Tasklist = $TasklistOut
-    Parent_DNSServers = $DNSServers
-    Parent_DNSCache = $DNSCache
-    Parent_EventsArrMaxLength = $Global:EventsArrMaxLength
-    Parent_Protocols =  @{[UInt32]0 = "HOPOPT" ; [UInt32]1 = "ICMP" ; [UInt32]2 = "IGMP"; [UInt32]4 = "IP encapsulation" ; [UInt32]6 = "TCP"; [UInt32]17 = "UDP" ; [UInt32]58 = "IPv6-ICMP"}
-    Parent_FWActions = @{[int64]-9214364837600034816 = "Allow" ; [int64]-9218868437227405312 = "Deny"}
-    Parent_ActionsColor = @{[int64]-9214364837600034816 = "White" ; [int64]-9218868437227405312 = "DarkGray"}
-    Parent_FWDirections = @{"%%14593" = "OUT" ; "%%14592" = "IN"}
-    Parent_PrivateAddresses = '(^127\.)|(^192\.168\.)|(^169\.254\.)|(^10\.)|(^224\.)|(^240\.)|(^172\.1[6-9]\.)|(^172\.2[0-9]\.)|(^172\.3[0-1]\.)|(^::1$)|(^[fF][cCdD])|(2(?:2[4-9]|3\d)(?:\.(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]\d?|0)){3}$)|(255.255.255.255)'
-})
-
-$Global:newRunspace =[runspacefactory]::CreateRunspace()
-$Global:newRunspace.ApartmentState = "STA"
-$Global:newRunspace.ThreadOptions = "Default"         
-$Global:newRunspace.Open()
-$Global:newRunspace.SessionStateProxy.SetVariable("SyncHash",$SyncHash)
-$Global:psCmd = [PowerShell]::Create()
-$Hide = $Global:psCmd.AddScript({
-    <#
-    00 RecordID
-    01 TimeCreated
-    02 ProcessID
-    03 appFullPath
-    04 appname
-    05 FilterRTID
-    06 Action
-    07 Direction
-    08 SourceAddress
-    09 SourceName
-    10 SourcePort
-    11 DestAddress
-    12 DestName
-    13 Destport
-    14 Protocol
-    15 InterfaceIndex
-    #>
-
-    Register-ObjectEvent -InputObject $SyncHash.Parent_Watcher -EventName "EventRecordWritten" -Action {
-        if ($SyncHash.Parent_Watcher.Enabled) {
-            $StartDateTime = $(Get-Date)
-            Try {
-                $EventRecord = $EventArgs.EventRecord
-                $EventRecordXML = [xml]$EventRecord.ToXml()
-                $matchArray = ($SyncHash.Parent_TextBox_MatchText_Text -split ",")
-                $matchArrayPos = $matchArray.Where({ $_[0] -ne "!" })
-                $tmpArrayNeg = $matchArray.where({ $_[0] -eq "!" })
-                $matchArrayNeg = New-Object System.Collections.ArrayList($null) ; $tmpArrayNeg | % {$matchArrayNeg += $_.replace("!","")}
-                $appFullPath = $EventRecord.Properties[1].Value
-                $appName = $appFullPath.Substring($appFullPath.LastIndexOf("\") + 1)
-                if ($appName -eq "svchost.exe") {
-                    Try { $appName += "|$( $SyncHash.Parent_Tasklist.Where({$_.Split(",")[1] -eq [string]$EventRecord.Properties[0].Value}).Split(",")[2] )" } catch {$appName += "|-"}
-                    $appFullPath += $appName.Substring(11)
-                }
-
-                $outstr = @($( `
-                $EventRecord.RecordID, `
-                $EventRecord.TimeCreated.ToString("yyyy/MM/dd HH:mm:ss"), `
-                [string]$EventRecord.Properties[0].Value, `
-                $appFullPath, `
-                $appname, `
-                $("FilterId:" + ((($EventRecordXML).Event.EventData.Data.Where({$_.Name -eq "FilterRTID"})).'#text')), `
-                $($SyncHash.Parent_FWActions.($EventRecord.Keywords)), `
-                $($SyncHash.Parent_FWDirections.($EventRecord.Properties[2].Value)), `
-                $EventRecord.Properties[3].Value, `
-                $( ([object[]]($SyncHash.Parent_DNSCache.Where({$_.Data -eq $EventRecord.Properties[3].Value}))[0]).Name ), `
-                $EventRecord.Properties[4].Value, `
-                $EventRecord.Properties[5].Value, `
-                $( ([object[]]($SyncHash.Parent_DNSCache.Where({$_.Data -eq $EventRecord.Properties[5].Value}))[0]).Name ), `
-                $EventRecord.Properties[6].Value, `
-                $($SyncHash.Parent_Protocols.$($EventRecord.Properties[7].Value)), `
-                $((($EventRecordXML).Event.EventData.Data.Where({$_.Name -eq "InterfaceIndex"})).'#text') ))
-
-                # Применение фильтров
-                $EventFiltered = $false
-
-                if ((-Not $SyncHash.Parent_CheckBox_IPv4_IsChecked) -and ($outstr[8].Indexof(":") -eq -1) -and ($outstr[11].Indexof(":") -eq -1)) {$EventFiltered = $true}
-                if ((-Not $SyncHash.Parent_CheckBox_IPv6_IsChecked) -and ($outstr[8].Indexof(":") -ne -1) -and ($outstr[11].Indexof(":") -ne -1)) {$EventFiltered = $true}
-                if ((-Not $SyncHash.Parent_CheckBox_DNS_IsChecked) -and ($SyncHash.Parent_DNSServers.IndexOf($outstr[11]) -ne -1) -and (($outstr[13] -eq "53") -or ($outstr[13] -eq "5353"))) {$EventFiltered = $true}
-                if ((-Not $SyncHash.Parent_CheckBox_DHCP_IsChecked) -and ((($outstr[10] -eq "68") -and ($outstr[13] -eq "67")) -or (($outstr[8].Indexof(":") -ne -1) -and (($outstr[10] -eq "546") -or ($outstr[13] -eq "547")))) -and ($outstr[14] -eq "UDP")) {$EventFiltered = $true}
-            
-                $SourceIPIsPrivate = $outstr[8] -match $SyncHash.Parent_PrivateAddresses
-                $DestIPIsPrivate = $outstr[11] -match $SyncHash.Parent_PrivateAddresses
-                if (-Not $SyncHash.Parent_CheckBox_Other_IsChecked) {
-                    If ($SourceIPIsPrivate -and $DestIPIsPrivate) {$EventFiltered = $true}
-                }
-                if (-Not $SyncHash.Parent_CheckBox_Global_IsChecked) {
-                    If ((-Not $SourceIPIsPrivate) -or (-Not $DestIPIsPrivate)) {$EventFiltered = $true}
-                }
-                    
-                if ($SyncHash.Parent_TextBox_MatchText_Text -ne "") {
-                    If ($matchArrayNeg.Count -ne 0) {
-                        If ( ($matchArrayNeg.Where({ $outstr[1,2,4,5,6,7,8,9,10,11,12,13,14,15] -match $_ })).Count -gt 0 ) {
-                            $EventFiltered = $true
-                        }
-                    }
-                    If ($matchArrayPos.Count -ne 0) {
-                        If ( ($matchArrayPos.Where({ $outstr[1,2,4,5,6,7,8,9,10,11,12,13,14,15] -match $_ })).Count -ne $matchArrayPos.Count ) {
-                            $EventFiltered = $true
-                        }
-                    }
-                }
-
-                #$SyncHash.Parent_ConsoleHost.Ui.WriteLine($($SyncHash.Parent_EventsArr.Count))
-                If (-Not $EventFiltered) {
-                    # Out-Array
-                    if ($SyncHash.Parent_EventsArrMaxLength -ne 0) {
-                        If ($SyncHash.Parent_EventsArr.Count -gt $SyncHash.Parent_EventsArrMaxLength) { $SyncHash.Parent_EventsArr.RemoveRange(0,($SyncHash.Parent_EventsArr.Count - $SyncHash.Parent_EventsArrMaxLength)) }
-                        If ($SyncHash.Parent_EventsArr.Count -eq $SyncHash.Parent_EventsArrMaxLength) { $SyncHash.Parent_EventsArr.RemoveAt(0) }
-                    }
-                    $SyncHash.Parent_EventsArr.Add($(@($outStr[0];[string[]]($outStr[1] -split " ");[string[]]$outStr[2,3,5,6,7,8,9,10,11,12,13,14,15]) -join ";"))
-                
-
-                    #Out-Console
-                    $BackgroundColor = $SyncHash.Parent_ConsoleHost.UI.RawUI.BackgroundColor
-                    $ForegroundMarkColor = "Yellow"
-
-                    if ($SyncHash.Parent_TextBox_MarkText_Text -eq "") {
-                        $SyncHash.Parent_ConsoleHost.Ui.WriteLine($($SyncHash.Parent_ActionsColor.($EventRecord.Keywords)),$BackgroundColor,$($outstr[1,2,4,5,6,7,8,9,10,11,12,13,14,15]))
-                    } else {
-                        $markArray = ($SyncHash.Parent_TextBox_MarkText_Text -split ",")
-                        $bColor = $BackgroundColor
-                        If ( $markArray.Where({ $outstr[1,2,4,5,6,7,8,9,10,11,12,13,14,15] -match $_ }) ) {
-                            $bColor = "DarkGreen"
-                            ForEach ($element in $outstr[1,2,4,5,6,7,8,9,10,11,12,13,14,15]) {
-                                If ( $markArray.Where({ $element -match $_ }) ) {$fColor = $ForegroundMarkColor} else {$fColor = $($SyncHash.Parent_ActionsColor.($EventRecord.Keywords))}
-                                $SyncHash.Parent_ConsoleHost.Ui.Write($fColor,$bColor,($element + " "))
-                            }
-                            $SyncHash.Parent_ConsoleHost.Ui.WriteLine()
-                        }
-                        else {
-                            $SyncHash.Parent_ConsoleHost.Ui.WriteLine($($SyncHash.Parent_ActionsColor.($EventRecord.Keywords)),$BackgroundColor,$($outstr[1,2,4,5,6,7,8,9,10,11,12,13,14,15]))
-                        }
-                    }   
-                }
-
-            #$SyncHash.Parent_ConsoleHost.Ui.WriteLine($((New-TimeSpan -Start $StartDateTime -End (Get-Date)).TotalMilliseconds))
-            } catch {$SyncHash.Parent_ConsoleHost.Ui.WriteLine(@($_.InvocationInfo.PositionMessage))}
-        }
-    }
-
-})
-$Global:psCmd.Runspace = $Global:newRunspace
-$Global:RunspaceHandle = $Global:psCmd.BeginInvoke()
 
 $Window_main.Add_Loaded({
     $Window_main.Title += $applicationName + " v." + $applicationVersion
@@ -948,3 +917,4 @@ $Window_main.Activate() | Out-Null
 $Window_main.Focus() | Out-Null
 Write-Host "`nWaiting for commands" -ForegroundColor $MessagesColor
 $Window_main.ShowDialog() | Out-Null
+### fwmon end
