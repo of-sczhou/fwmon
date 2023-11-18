@@ -262,7 +262,7 @@ $ButtonWF.add_Click.Invoke({
 $Query = @"
 <QueryList>
     <Query Id="0" Path="Security">
-    <Select Path="Security">*[System[(EventID=5150 or EventID=5152 or EventID=5153 or EventID=5156 or EventID=5157)]]</Select>
+    <Select Path="Security">*[System[(EventID=5150 or EventID=5153 or EventID=5156 or EventID=5157)]]</Select>
     </Query>
 </QueryList>
 "@
@@ -470,7 +470,7 @@ $Global:psCmd_Events = [PowerShell]::Create()
                         $markArray = ($hashtable_Events.Parent_TextBox_MarkText_Text -split ",")
                         $bColor = $BackgroundColor
                         If ( $markArray.Where({ $outstr[1,2,4,5,6,7,8,9,10,11,12,13,14,15] -match $_ }) ) {
-                            $bColor = "DarkGreen"
+                            #$bColor = "DarkGreen"
                             ForEach ($element in $outstr[1,2,4,5,6,7,8,9,10,11,12,13,14,15]) {
                                 If ( $markArray.Where({ $element -match $_ }) ) {$fColor = $ForegroundMarkColor} else {$fColor = $($hashtable_Events.Parent_ActionsColor.($EventRecord.Keywords))}
                                 $hashtable_Events.Parent_ConsoleHost.Ui.Write($fColor,$bColor,($element + " "))
@@ -524,7 +524,7 @@ $Button_Go.add_Click.Invoke({
         Write-Host "Reading event log" -ForegroundColor $MessagesColor
         [System.Collections.ArrayList]$EventsArr = Get-WinEvent -ErrorAction SilentlyContinue -FilterHashtable @{
             LogName = "Security"
-            Id = 5150,5152,5153,5156,5157
+            Id = 5150,5153,5156,5157
             StartTime = $StartDateTime
             EndTime = $EndDateTime
         }
@@ -607,8 +607,8 @@ $Button_Go.add_Click.Invoke({
                     $markArray = ($TextBox_MarkText.Text -split ",")
                     If ( $markArray.Where({ $outstr[1,2,4,5,6,7,8,9,10,11,12,13,14,15] -match $_ }) ) {
                         ForEach ($element in $outstr[1,2,4,5,6,7,8,9,10,11,12,13,14,15]) {
-                            If ( $markArray.Where({ $element -match $_ }) ) {$fColor = $ForegroundMarkColor} else {$fColor = $ActionsColor.($EventRecord.Keywords)}
-                            Write-Host ($element + " ") -ForegroundColor $fColor -BackgroundColor "DarkGreen" -NoNewline
+                            If ( $markArray.Where({ $element -match $_ }) ) {$fColor = "Yellow"} else {$fColor = $ActionsColor.($EventRecord.Keywords)}
+                            Write-Host ($element + " ") -ForegroundColor $fColor -NoNewline
                         }
                         Write-Host
                     }
@@ -894,6 +894,9 @@ $Button_outExcel.add_Click.Invoke({
         $worksheet.Columns.AutoFit() | Out-Null
         $headerRange = $worksheet.Range("A1","P1")
         $headerRange.AutoFilter() | Out-Null
+        $excelObject.Application.ActiveWindow.SplitRow = 1
+        $excelObject.Application.ActiveWindow.FreezePanes = $true
+
         #$table = $excelObject.ActiveSheet.ListObjects.Add([Microsoft.Office.Interop.Excel.XlListObjectSourceType]::xlSrcRange, $excelObject.ActiveCell.CurrentRegion, $null ,[Microsoft.Office.Interop.Excel.XlYesNoGuess]::xlYes)
         $xlsxFile = $FileName.replace(".txt",".xlsx")
         $Workbook.SaveAs($xlsxFile, 51)
