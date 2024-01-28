@@ -271,10 +271,7 @@ $subscriptionQuery = [System.Diagnostics.Eventing.Reader.EventLogQuery]::new("Se
 [System.Diagnostics.Eventing.Reader.EventLogWatcher]$Global:Watcher = [System.Diagnostics.Eventing.Reader.EventLogWatcher]::new($subscriptionQuery)
 
 # Thread for getting svchost instances to array
-[System.Collections.ArrayList]$TaskList = New-Object System.Collections.ArrayList
-[System.Collections.ArrayList]$((Tasklist /svc /fo csv /nh /fi "imagename eq svchost.exe").Replace('"',"")) | % {
-    $TaskList.Add([pscustomobject] @{PID = $_.Split(",")[1]; SvcName = $_.Split(",")[2]}) | Out-Null
-}
+[System.Collections.ArrayList]$TaskList = Tasklist /svc /fo csv /nh /fi "imagename eq svchost.exe" | ConvertFrom-Csv -Delimiter "," -Header @("Name","PID","Services")
 $hashtable_TaskList = [hashtable]::Synchronized(@{Parent_TaskList = $TaskList ; Parent_Watcher = $Global:Watcher ; Parent_ConsoleHost = (Get-Host)})
 $Runspace_TaskList =[runspacefactory]::CreateRunspace()
 $Runspace_TaskList.ApartmentState = "STA"
@@ -291,10 +288,7 @@ $psCmd_TaskList = [PowerShell]::Create()
     Register-ObjectEvent -InputObject $ProcessWatcher -EventName "EventArrived" -Action { 
         if ($hashtable_TaskList.Parent_Watcher.Enabled -and ($EventArgs.NewEvent.TargetInstance.Description -eq "svchost.exe")) {
             $hashtable_TaskList.Parent_TaskList.Clear()
-            [System.Collections.ArrayList]$((Tasklist /svc /fo csv /nh /fi "imagename eq svchost.exe").Replace('"',"")) | % {
-                $hashtable_TaskList.Parent_TaskList.Add([pscustomobject] @{PID = $_.Split(",")[1]; SvcName = $_.Split(",")[2]})
-            }
-            #$hashtable_TaskList.Parent_ConsoleHost.Ui.WriteLine("*_* ProcCr")
+            $hashtable_TaskList.Parent_TaskList.AddRange($( Tasklist /svc /fo csv /nh /fi "imagename eq svchost.exe" | ConvertFrom-Csv -Delimiter "," -Header @("Name","PID","Services") ))
         }
     }
 
@@ -306,9 +300,7 @@ $psCmd_TaskList = [PowerShell]::Create()
     Register-ObjectEvent -InputObject $ProcessWatcher2 -EventName "EventArrived" -Action {
         if ($hashtable_TaskList.Parent_Watcher.Enabled -and ($EventArgs.NewEvent.TargetInstance.Description -eq "svchost.exe")) {
             $hashtable_TaskList.Parent_TaskList.Clear()
-            [System.Collections.ArrayList]$((Tasklist /svc /fo csv /nh /fi "imagename eq svchost.exe").Replace('"',"")) | % {
-                $hashtable_TaskList.Parent_TaskList.Add([pscustomobject] @{PID = $_.Split(",")[1]; SvcName = $_.Split(",")[2]})
-            }
+            $hashtable_TaskList.Parent_TaskList.AddRange($( Tasklist /svc /fo csv /nh /fi "imagename eq svchost.exe" | ConvertFrom-Csv -Delimiter "," -Header @("Name","PID","Services") ))
         }
     }
 })
@@ -398,7 +390,7 @@ $Global:psCmd_Events = [PowerShell]::Create()
                 $appFullPath = $EventRecord.Properties[1].Value
                 $appName = $appFullPath.Substring($appFullPath.LastIndexOf("\") + 1)
                 if ($appName -eq "svchost.exe") {
-                    Try { $appName += "|$( $hashtable_Events.Parent_Tasklist.Where({$_.PID -eq [string]$EventRecord.Properties[0].Value}).SvcName )" } catch {$appName += "|-"}
+                    Try { $appName += "|$( $hashtable_Events.Parent_Tasklist.Where({$_.PID -eq [string]$EventRecord.Properties[0].Value}).Services )" } catch {$appName += "|-"}
                     $appFullPath += $appName.Substring(11)
                 }
 
