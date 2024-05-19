@@ -1,6 +1,6 @@
 ﻿### fwmon start
 $applicationName = "Firewall Monitor"
-$applicationVersion = "1.0.0.1"
+$applicationVersion = "1.0.0.2"
 
 Add-Type -AssemblyName PresentationFramework
 Add-Type -AssemblyName System.Windows.Forms
@@ -112,7 +112,7 @@ Write-Host "`n`nStarting GUI..." -ForegroundColor $MessagesColor
                 <TextBlock>  
                         While realtime monitoring it is Max number of events in memory buffer, same as outFile max capacity.
                         <LineBreak/>
-                        Max value 2 147 483 647 events. 0 means never stop writing to RAM (seems to be bad idea).
+                        Max value 2 147 483 647 events. 0 means never stop writing to RAM.
                 </TextBlock>
             </TextBox.ToolTip>
         </TextBox>
@@ -262,7 +262,7 @@ $ButtonWF.add_Click.Invoke({
 $Query = @"
 <QueryList>
     <Query Id="0" Path="Security">
-    <Select Path="Security">*[System[(EventID=5150 or EventID=5153 or EventID=5156 or EventID=5157)]]</Select>
+    <Select Path="Security">*[System[(EventID=5150 or EventID=5152 or EventID=5153 or EventID=5156 or EventID=5157)]]</Select>
     </Query>
 </QueryList>
 "@
@@ -404,7 +404,7 @@ $Global:psCmd_Events = [PowerShell]::Create()
                 $($hashtable_Events.Parent_FWActions.($EventRecord.Keywords)), `
                 $($hashtable_Events.Parent_FWDirections.($EventRecord.Properties[2].Value)), `
                 $EventRecord.Properties[3].Value, `
-                $( ([object[]]($hashtable_Events.Parent_DNSCache.Where({$_.Data -eq $EventRecord.Properties[3].Value}))[0]).Name ), `
+                $( Try {([object[]]($hashtable_Events.Parent_DNSCache.Where({$_.Data -eq $EventRecord.Properties[3].Value}))[0]).Name} catch {""} ), `
                 $EventRecord.Properties[4].Value, `
                 $EventRecord.Properties[5].Value, `
                 $( ([object[]]($hashtable_Events.Parent_DNSCache.Where({$_.Data -eq $EventRecord.Properties[5].Value}))[0]).Name ), `
@@ -516,7 +516,7 @@ $Button_Go.add_Click.Invoke({
         Write-Host "Reading event log" -ForegroundColor $MessagesColor
         [System.Collections.ArrayList]$EventsArr = Get-WinEvent -ErrorAction SilentlyContinue -FilterHashtable @{
             LogName = "Security"
-            Id = 5150,5153,5156,5157
+            Id = 5150,5152,5153,5156,5157
             StartTime = $StartDateTime
             EndTime = $EndDateTime
         }
